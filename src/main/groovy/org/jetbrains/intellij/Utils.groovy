@@ -9,7 +9,6 @@ import com.jetbrains.plugin.structure.intellij.plugin.IdePluginManager
 import org.apache.commons.io.FileUtils
 import org.apache.commons.io.filefilter.AbstractFileFilter
 import org.apache.commons.io.filefilter.FalseFileFilter
-import org.apache.commons.io.filefilter.TrueFileFilter
 import org.gradle.api.Project
 import org.gradle.api.Task
 import org.gradle.api.file.FileCollection
@@ -23,6 +22,7 @@ import org.gradle.util.CollectionUtils
 import org.jetbrains.annotations.NotNull
 import org.jetbrains.annotations.Nullable
 import org.jetbrains.intellij.dependency.IntellijIvyArtifact
+import org.jetbrains.intellij.dependency.PluginDependencyNotation
 import org.xml.sax.ErrorHandler
 import org.xml.sax.InputSource
 import org.xml.sax.SAXException
@@ -146,6 +146,10 @@ class Utils {
     }
 
     static Node parseXml(File file) {
+        return parseXml(new FileInputStream(file))
+    }
+
+    static Node parseXml(InputStream inputStream) {
         def parser = new XmlParser(false, true, true)
         parser.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
         parser.setErrorHandler(new ErrorHandler() {
@@ -164,7 +168,6 @@ class Utils {
                 throw e
             }
         })
-        InputStream inputStream = new FileInputStream(file)
         InputSource input = new InputSource(new InputStreamReader(inputStream, "UTF-8"))
         input.setEncoding("UTF-8")
         try {
@@ -176,17 +179,17 @@ class Utils {
     }
 
     static boolean isJarFile(@NotNull File file) {
-        return FileUtilKt.isJar(file)
+        return FileUtilKt.isJar(file.toPath())
     }
 
     static boolean isZipFile(@NotNull File file) {
-        return FileUtilKt.isZip(file)
+        return FileUtilKt.isZip(file.toPath())
     }
 
     @NotNull
-    static parsePluginDependencyString(@NotNull String s) {
+    static PluginDependencyNotation parsePluginDependencyString(@NotNull String s) {
         if (new File(s).exists()) {
-            return new Tuple(s, null, null)
+            return new PluginDependencyNotation(s, null, null)
         }
 
         def id = null, version = null, channel = null
@@ -201,7 +204,7 @@ class Utils {
             version = versionAndChannel[0]
             channel = versionAndChannel.length > 1 ? versionAndChannel[1] : null
         }
-        return new Tuple(id ?: null, version ?: null, channel ?: null)
+        return new PluginDependencyNotation(id ?: null, version ?: null, channel ?: null)
     }
 
     static String stringInput(input) {
@@ -216,14 +219,13 @@ class Utils {
     }
 
     @NotNull
-    static Collection<File> collectJars(@NotNull File directory, @NotNull final Predicate<File> filter,
-                                        boolean recursively) {
+    static Collection<File> collectJars(@NotNull File directory, @NotNull final Predicate<File> filter) {
         return FileUtils.listFiles(directory, new AbstractFileFilter() {
             @Override
             boolean accept(File file) {
-                return FileUtilKt.isJar(file) && filter.test(file)
+                return isJarFile(file) && filter.test(file)
             }
-        }, recursively ? TrueFileFilter.INSTANCE : FalseFileFilter.FALSE)
+        }, FalseFileFilter.FALSE)
     }
 
     static String resolveToolsJar(String javaExec) {
@@ -256,8 +258,9 @@ class Utils {
                      @NotNull File cacheDirectory,
                      @NotNull Project project,
                      @Nullable Predicate<File> isUpToDate,
-                     @Nullable BiConsumer<File, File> markUpToDate) {
-        def targetDirectory = new File(cacheDirectory, zipFile.name - ".zip")
+                     @Nullable BiConsumer<File, File> markUpToDate,
+                     @Nullable String targetDirName = null) {
+        def targetDirectory = new File(cacheDirectory, targetDirName ?: zipFile.name - ".zip")
         def markerFile = new File(targetDirectory, "markerFile")
         if (markerFile.exists() && (isUpToDate == null || isUpToDate.test(markerFile))) {
             return targetDirectory
@@ -282,7 +285,7 @@ class Utils {
         return targetDirectory
     }
 
-    private static def MAJOR_VERSION_PATTERN = Pattern.compile('(RIDER-)?\\d{4}\\.\\d-SNAPSHOT')
+    private static Pattern MAJOR_VERSION_PATTERN = Pattern.compile('(RIDER-)?\\d{4}\\.\\d-SNAPSHOT')
 
     static String releaseType(@NotNull String version) {
         if (version.endsWith('-EAP-SNAPSHOT') || version.endsWith('-EAP-CANDIDATE-SNAPSHOT') || version.endsWith('-CUSTOM-SNAPSHOT') || MAJOR_VERSION_PATTERN.matcher(version).matches()) {
@@ -328,7 +331,7 @@ class Utils {
     }
 
     static IdePlugin createPlugin(@NotNull File artifact, boolean validatePluginXml, def loggingContext) {
-        def creationResult = IdePluginManager.createManager().createPlugin(artifact, validatePluginXml)
+        def creationResult = IdePluginManager.createManager().createPlugin(artifact.toPath(), validatePluginXml, IdePluginManager.PLUGIN_XML)
         if (creationResult instanceof PluginCreationSuccess) {
             return creationResult.plugin as IdePlugin
         } else if (creationResult instanceof PluginCreationFail) {
@@ -338,5 +341,32 @@ class Utils {
             warn(loggingContext, "Cannot create plugin from file ($artifact). $creationResult")
         }
         return null
+    }
+
+    @NotNull
+    static File downloadZipArtifact(@NotNull Project project, @NotNull String repoUrl, @NotNull String repoPattern,
+                                    @NotNull String dependency) {
+        debug(project, "Adding pseudo-Ivy repository to download $dependency - $repoUrl/$repoPattern")
+        def pseudoRepo = project.repositories.ivy {
+            url repoUrl
+            layout("pattern") {
+                artifact repoPattern
+            }
+            metadataSources {
+                artifact()
+            }
+        }
+        def projectDependency = project.dependencies.create("$dependency@zip")
+        def zipFile = null
+        try {
+            def configuration = project.configurations.detachedConfiguration(projectDependency)
+            zipFile = configuration.singleFile
+            debug(project, "Downloaded zip artifact: $zipFile")
+        } catch (Exception e) {
+            debug(project, "Couldn't find " + dependency + " in $repoUrl/$repoPattern", e)
+        }
+        debug(project, "Removing pseudo-Ivy repository $repoUrl/$repoPattern")
+        project.repositories.remove(pseudoRepo)
+        return zipFile
     }
 }

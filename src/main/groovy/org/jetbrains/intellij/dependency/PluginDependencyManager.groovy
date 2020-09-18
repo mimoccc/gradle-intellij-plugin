@@ -18,38 +18,52 @@ class PluginDependencyManager {
     private final String cacheDirectoryPath
     private final String mavenCacheDirectoryPath
     private final IdeaDependency ideaDependency
+    private final List<PluginsRepository> pluginsRepositories
 
     private Set<String> pluginSources = new HashSet<>()
     private IvyArtifactRepository ivyArtifactRepository
 
-    PluginDependencyManager(@NotNull String gradleHomePath, @Nullable IdeaDependency ideaDependency) {
+    PluginDependencyManager(@NotNull String gradleHomePath, @Nullable IdeaDependency ideaDependency,
+                            @NotNull List<PluginsRepository> pluginsRepositories) {
         this.ideaDependency = ideaDependency
+        this.pluginsRepositories = pluginsRepositories
         // todo: a better way to define cache directory
         mavenCacheDirectoryPath = Paths.get(gradleHomePath, 'caches/modules-2/files-2.1').toString()
         cacheDirectoryPath = Paths.get(mavenCacheDirectoryPath, 'com.jetbrains.intellij.idea').toString()
     }
 
     @NotNull
-    PluginDependency resolve(@NotNull Project project, @NotNull String id, @Nullable String version, @Nullable String channel) {
-        if (!version && !channel) {
-            if (Paths.get(id).absolute) {
-                return externalPluginDependency(project, new File(id), null)
+    PluginDependency resolve(@NotNull Project project, @NotNull PluginDependencyNotation dependency) {
+        if (!dependency.version && !dependency.channel) {
+            if (Paths.get(dependency.id).absolute) {
+                return externalPluginDependency(project, new File(dependency.id), null)
             } else if (ideaDependency) {
-                Utils.info(project, "Looking for builtin $id in $ideaDependency.classes.absolutePath")
-                def pluginDirectory = ideaDependency.pluginsRegistry.findPlugin(id)
+                Utils.info(project, "Looking for builtin $dependency.id in $ideaDependency.classes.absolutePath")
+                def pluginDirectory = ideaDependency.pluginsRegistry.findPlugin(dependency.id)
                 if (pluginDirectory != null) {
                     def builtinPluginVersion = "$ideaDependency.name-$ideaDependency.buildNumber${ideaDependency.sources ? '-withSources' : ''}"
                     return new PluginDependencyImpl(pluginDirectory.name, builtinPluginVersion, pluginDirectory, true)
                 }
             }
-            throw new BuildException("Cannot find builtin plugin $id for IDE: $ideaDependency.classes.absolutePath", null)
+            throw new BuildException("Cannot find builtin plugin $dependency.id for IDE: $ideaDependency.classes.absolutePath", null)
         }
-        return resolveRemote(project, id, version, channel)
+        for (def repo in this.pluginsRepositories) {
+            def pluginFile = repo.resolve(dependency)
+            if (pluginFile != null) {
+                if (pluginFile != null && Utils.isZipFile(pluginFile)) {
+                    return zippedPluginDependency(project, pluginFile, dependency)
+                } else if (Utils.isJarFile(pluginFile)) {
+                    return externalPluginDependency(project, pluginFile, dependency.channel, true)
+                }
+                throw new BuildException("Invalid type of downloaded plugin: $pluginFile.name", null)
+            }
+        }
+        throw new BuildException("Cannot resolve plugin $dependency.id version $dependency.version ${dependency.channel != null ? "from channel $dependency.channel" : ""}", null)
     }
 
     void register(@NotNull Project project, @NotNull PluginDependency plugin, @NotNull DependencySet dependencies) {
         if (plugin.maven && Utils.isJarFile(plugin.artifact)) {
-            dependencies.add(project.dependencies.create(pluginDependency(plugin.id, plugin.version, plugin.channel)))
+            dependencies.add(plugin.notation.toDependency(project))
             return
         }
         registerRepoIfNeeded(project, plugin)
@@ -60,17 +74,12 @@ class PluginDependencyManager {
     }
 
     @NotNull
-    private PluginDependency resolveRemote(@NotNull Project project, @NotNull String id, @NotNull String version, @Nullable String channel) {
-        def dependency = project.dependencies.create(pluginDependency(id, version, channel))
-        def configuration = project.configurations.detachedConfiguration(dependency)
-        def pluginFile = configuration.singleFile
-        if (Utils.isZipFile(pluginFile)) {
-            def pluginDir = findSingleDirectory(Utils.unzip(pluginFile, new File(cacheDirectoryPath, groupId(channel)), project, null, null))
-            return externalPluginDependency(project, pluginDir, channel, true)
-        } else if (Utils.isJarFile(pluginFile)) {
-            return externalPluginDependency(project, pluginFile, channel, true)
-        }
-        throw new BuildException("Invalid type of downloaded plugin: $pluginFile.name", null)
+    private PluginDependency zippedPluginDependency(Project project, File pluginFile, @NotNull PluginDependencyNotation dependency) {
+        def pluginDir = findSingleDirectory(Utils.unzip(
+                pluginFile, new File(cacheDirectoryPath, groupId(dependency.channel)),
+                project, null, null,
+                "$dependency.id-$dependency.version"))
+        return externalPluginDependency(project, pluginDir, dependency.channel, true)
     }
 
     private static String groupId(@Nullable String channel) {
@@ -156,10 +165,5 @@ class PluginDependencyManager {
             return pluginDependency
         }
         return null
-    }
-
-    private static def pluginDependency(@NotNull String id, @NotNull String version, @Nullable String channel) {
-        def groupPrefix = channel ? "$channel." : ""
-        return "${groupPrefix}com.jetbrains.plugins:$id:$version"
     }
 }

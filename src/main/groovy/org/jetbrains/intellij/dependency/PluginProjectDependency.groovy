@@ -1,37 +1,43 @@
 package org.jetbrains.intellij.dependency
 
 import com.jetbrains.plugin.structure.base.plugin.PluginCreationSuccess
+import com.jetbrains.plugin.structure.intellij.plugin.IdePlugin
 import com.jetbrains.plugin.structure.intellij.plugin.IdePluginManager
+import com.jetbrains.plugin.structure.intellij.version.IdeVersion
+import groovy.transform.CompileStatic
 import groovy.transform.ToString
 import org.gradle.api.Project
 import org.jetbrains.annotations.NotNull
 import org.jetbrains.annotations.Nullable
 import org.jetbrains.intellij.IntelliJPlugin
 import org.jetbrains.intellij.Utils
+import org.jetbrains.intellij.tasks.PrepareSandboxTask
 
+@CompileStatic
 @ToString(includeNames = true, includeFields = true, ignoreNulls = true)
-class PluginProjectDependency implements PluginDependency, Serializable {
+class PluginProjectDependency implements PluginDependency {
     @NotNull
     private transient Project project
 
     @Lazy
     private File pluginDirectory = {
         def prepareSandboxTask = project?.tasks?.findByName(IntelliJPlugin.PREPARE_SANDBOX_TASK_NAME)
-        //noinspection GroovyAssignabilityCheck
-        return prepareSandboxTask != null ?
-                new File(prepareSandboxTask.destinationDir, prepareSandboxTask.pluginName) : null
+        return prepareSandboxTask instanceof PrepareSandboxTask ?
+                new File(prepareSandboxTask.getDestinationDir(), prepareSandboxTask.getPluginName()) : null
     }()
 
     @Lazy
     private transient PluginDependencyImpl pluginDependency = {
         if (pluginDirectory.exists()) {
-            def creationResult = IdePluginManager.createManager().createPlugin(pluginDirectory)
+            def creationResult = IdePluginManager.createManager().createPlugin(pluginDirectory.toPath())
             if (creationResult instanceof PluginCreationSuccess) {
-                def intellijPlugin = creationResult.plugin
-                def pluginDependency = new PluginDependencyImpl(intellijPlugin.pluginId, intellijPlugin.pluginVersion, pluginDirectory)
-                pluginDependency.sinceBuild = intellijPlugin.sinceBuild?.asStringWithoutProductCode()
-                pluginDependency.untilBuild = intellijPlugin.untilBuild?.asStringWithoutProductCode()
-                return pluginDependency
+                def intellijPlugin = creationResult.getPlugin()
+                if (intellijPlugin instanceof IdePlugin) {
+                    def pluginDependency = new PluginDependencyImpl(intellijPlugin.pluginId, intellijPlugin.pluginVersion, pluginDirectory)
+                    pluginDependency.sinceBuild = intellijPlugin.getSinceBuild()?.asStringWithoutProductCode()
+                    pluginDependency.untilBuild = intellijPlugin.getUntilBuild()?.asStringWithoutProductCode()
+                    return pluginDependency
+                }
             }
             Utils.error(project, "Cannot use $pluginDirectory as a plugin dependency. " + creationResult)
         }
@@ -97,5 +103,15 @@ class PluginProjectDependency implements PluginDependency, Serializable {
     @Override
     boolean isMaven() {
         return false
+    }
+
+    @Override
+    boolean isCompatible(@NotNull IdeVersion ideVersion) {
+        return true
+    }
+
+    @Override
+    PluginDependencyNotation getNotation() {
+        return new PluginDependencyNotation(id, null, null)
     }
 }
